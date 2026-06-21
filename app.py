@@ -315,15 +315,15 @@ def calculate_support_cost(
     base_service = get_a6_service(master_df, service_codes["base"])
 
     rows = []
-    base_subtotal = base_service["units"] * visit_count
+    base_subtotal = base_service["units"]
     rows.append(
         {
             "項目": f"{support_level} 基本サービス",
             "サービスコード": base_service["service_code"],
             "単位数": base_service["units"],
-            "回数": visit_count,
+            "回数": 1,
             "小計単位": base_subtotal,
-            "備考": base_service["name"],
+            "備考": f"{base_service['name']} / 1月につき",
         }
     )
 
@@ -336,7 +336,7 @@ def calculate_support_cost(
             continue
 
         service = get_a6_service(master_df, addition["code"])
-        count = visit_count if addition["kind"] == "per_visit" else 1
+        count = 1
         subtotal = service["units"] * count
         addition_total += subtotal
         rows.append(
@@ -346,7 +346,7 @@ def calculate_support_cost(
                 "単位数": service["units"],
                 "回数": count,
                 "小計単位": subtotal,
-                "備考": service["name"],
+                "備考": f"{service['name']} / 1月につき",
             }
         )
 
