@@ -213,6 +213,30 @@ def calculate_care_cost(
     }
 
 
+def render_visit_count_selector() -> tuple[str, list[int]]:
+    st.sidebar.subheader("利用回数")
+    selection_mode = st.sidebar.radio(
+        "利用回数の指定方法",
+        ["利用頻度から選ぶ", "任意の利用回数を選択"],
+    )
+
+    if selection_mode == "利用頻度から選ぶ":
+        frequency_label = st.sidebar.selectbox("利用頻度", list(VISIT_COUNTS.keys()), index=2)
+        return selection_mode, [VISIT_COUNTS[frequency_label]]
+
+    st.subheader("利用回数を選択")
+    st.caption("1回〜31回まで、必要な回数を選んでください。複数選ぶと回数ごとの料金を一覧表示します。")
+
+    selected_counts = []
+    checkbox_columns = st.columns(4)
+    for count in range(1, 32):
+        target_column = checkbox_columns[(count - 1) % len(checkbox_columns)]
+        if target_column.checkbox(f"{count}回", key=f"custom_visit_count_{count}"):
+            selected_counts.append(count)
+
+    return selection_mode, selected_counts
+
+
 require_password()
 
 st.title(APP_TITLE)
@@ -227,10 +251,9 @@ with st.sidebar:
         care_level = st.selectbox("介護度", ["要支援1", "要支援2"])
 
     burden_label = st.selectbox("負担割合", list(BURDEN_RATES.keys()))
-    frequency_label = st.selectbox("利用頻度", list(VISIT_COUNTS.keys()), index=2)
     include_cafe = st.checkbox("カフェ代 250円/回", value=False)
 
-visit_count = VISIT_COUNTS[frequency_label]
+selection_mode, selected_visit_counts = render_visit_count_selector()
 burden_rate = BURDEN_RATES[burden_label]
 
 if user_type == "要介護":
@@ -249,30 +272,63 @@ if user_type == "要介護":
         value=True,
     )
 
-    result = calculate_care_cost(
-        care_level=care_level,
-        visit_count=visit_count,
-        burden_rate=burden_rate,
-        selected_additions=selected_additions,
-        include_treatment_improvement=include_treatment_improvement,
-        include_cafe=include_cafe,
-    )
+    if not selected_visit_counts:
+        st.warning("利用回数を1つ以上選択してください。")
+        st.stop()
+
+    calculation_results = {
+        visit_count: calculate_care_cost(
+            care_level=care_level,
+            visit_count=visit_count,
+            burden_rate=burden_rate,
+            selected_additions=selected_additions,
+            include_treatment_improvement=include_treatment_improvement,
+            include_cafe=include_cafe,
+        )
+        for visit_count in selected_visit_counts
+    }
+
+    primary_visit_count = selected_visit_counts[0]
+    result = calculation_results[primary_visit_count]
 
     st.subheader("計算結果")
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("月の目安利用回数", f"{visit_count} 回")
-    metric_cols[1].metric("総単位数", f"{result['total_units']:,} 単位")
-    metric_cols[2].metric("介護保険自己負担額", yen(result["insurance_cost"]))
-    metric_cols[3].metric("合計目安金額", yen(result["total_cost"]))
+    if len(selected_visit_counts) == 1:
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("月の目安利用回数", f"{primary_visit_count} 回")
+        metric_cols[1].metric("総単位数", f"{result['total_units']:,} 単位")
+        metric_cols[2].metric("介護保険自己負担額", yen(result["insurance_cost"]))
+        metric_cols[3].metric("合計目安金額", yen(result["total_cost"]))
 
-    detail_cols = st.columns(4)
-    detail_cols[0].metric("基本単位", f"{result['base_units']:,} 単位")
-    detail_cols[1].metric("加算単位", f"{result['addition_units']:,} 単位")
-    detail_cols[2].metric("処遇改善加算単位", f"{result['treatment_units']:,} 単位")
-    detail_cols[3].metric("保険外サービス費", yen(result["out_of_pocket"]))
+        detail_cols = st.columns(4)
+        detail_cols[0].metric("基本単位", f"{result['base_units']:,} 単位")
+        detail_cols[1].metric("加算単位", f"{result['addition_units']:,} 単位")
+        detail_cols[2].metric("処遇改善加算単位", f"{result['treatment_units']:,} 単位")
+        detail_cols[3].metric("保険外サービス費", yen(result["out_of_pocket"]))
 
-    st.subheader("内訳")
-    st.dataframe(pd.DataFrame(result["rows"]), use_container_width=True, hide_index=True)
+        st.subheader("内訳")
+        st.dataframe(pd.DataFrame(result["rows"]), use_container_width=True, hide_index=True)
+    else:
+        summary_rows = []
+        for visit_count, summary_result in calculation_results.items():
+            summary_rows.append(
+                {
+                    "利用回数": f"{visit_count}回",
+                    "基本単位": summary_result["base_units"],
+                    "加算単位": summary_result["addition_units"],
+                    "処遇改善加算単位": summary_result["treatment_units"],
+                    "総単位数": summary_result["total_units"],
+                    "介護保険自己負担額": yen(summary_result["insurance_cost"]),
+                    "保険外サービス費": yen(summary_result["out_of_pocket"]),
+                    "合計目安金額": yen(summary_result["total_cost"]),
+                }
+            )
+
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+        st.subheader("回数ごとの内訳")
+        for visit_count, detail_result in calculation_results.items():
+            with st.expander(f"{visit_count}回利用の場合: {yen(detail_result['total_cost'])}"):
+                st.dataframe(pd.DataFrame(detail_result["rows"]), use_container_width=True, hide_index=True)
 
 else:
     st.subheader("要支援 A6コード確認")
