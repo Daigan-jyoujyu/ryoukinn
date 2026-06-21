@@ -43,6 +43,41 @@ CARE_ADDITIONS = [
     {"name": "サービス提供体制強化加算Ⅲ", "units": 6, "kind": "per_visit", "note": "1回ごと"},
 ]
 
+SUPPORT_CARE_SERVICE_CODES = {
+    "事業対象者": {
+        "base": "1111",
+        "treatment": "6189",
+        "additions": [
+            {"key": "service_strength_3", "label": "サービス提供体制強化加算Ⅲ", "code": "6103", "kind": "monthly"},
+            {"key": "science", "label": "科学的介護推進体制加算", "code": "6311", "kind": "monthly"},
+        ],
+    },
+    "要支援1": {
+        "base": "1111",
+        "treatment": "6189",
+        "additions": [
+            {"key": "service_strength_3", "label": "サービス提供体制強化加算Ⅲ", "code": "6103", "kind": "monthly"},
+            {"key": "science", "label": "科学的介護推進体制加算", "code": "6311", "kind": "monthly"},
+        ],
+    },
+    "要支援2（週1回程度）": {
+        "base": "1221",
+        "treatment": "6189",
+        "additions": [
+            {"key": "service_strength_3", "label": "サービス提供体制強化加算Ⅲ", "code": "6124", "kind": "monthly"},
+            {"key": "science", "label": "科学的介護推進体制加算", "code": "6321", "kind": "monthly"},
+        ],
+    },
+    "要支援2（週2回程度）": {
+        "base": "1121",
+        "treatment": "6189",
+        "additions": [
+            {"key": "service_strength_3", "label": "サービス提供体制強化加算Ⅲ", "code": "6104", "kind": "monthly"},
+            {"key": "science", "label": "科学的介護推進体制加算", "code": "6311", "kind": "monthly"},
+        ],
+    },
+}
+
 
 st.set_page_config(page_title=APP_TITLE, page_icon="💴", layout="wide")
 
@@ -93,6 +128,60 @@ def load_csv_with_fallback(path: Path) -> pd.DataFrame:
         except UnicodeDecodeError as exc:
             last_error = exc
     raise last_error
+
+
+def load_raw_csv_with_fallback(path: Path) -> pd.DataFrame:
+    encodings = ["utf-8-sig", "cp932", "shift_jis", "utf-8"]
+    last_error = None
+    for encoding in encodings:
+        try:
+            return pd.read_csv(path, encoding=encoding, header=None, dtype=str)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    raise last_error
+
+
+@st.cache_data
+def load_a6_master() -> pd.DataFrame:
+    path = BASE_DIR / "20260601masuta_0522.csv"
+    if not path.exists():
+        return pd.DataFrame()
+
+    df = load_raw_csv_with_fallback(path)
+    if df.shape[1] < 7:
+        return pd.DataFrame()
+
+    current_df = df[
+        (df[1] == "A6")
+        & (df[3].astype(int) <= 202606)
+        & (df[4].astype(int) >= 202606)
+    ].copy()
+    current_df = current_df.rename(
+        columns={
+            1: "service_type",
+            2: "code",
+            5: "name",
+            6: "units",
+        }
+    )
+    current_df["units"] = current_df["units"].astype(int)
+    return current_df[["service_type", "code", "name", "units"]]
+
+
+def get_a6_service(master_df: pd.DataFrame, code: str) -> dict[str, object]:
+    if master_df.empty:
+        raise ValueError("A6サービスコード表CSVが見つかりません。")
+
+    rows = master_df[master_df["code"] == code]
+    if rows.empty:
+        raise ValueError(f"A6サービスコード {code} がCSVに見つかりません。")
+
+    row = rows.iloc[0]
+    return {
+        "service_code": f"{row['service_type']}{row['code']}",
+        "name": row["name"],
+        "units": int(row["units"]),
+    }
 
 
 def load_uploaded_csv_with_fallback(uploaded_file) -> pd.DataFrame:
@@ -213,6 +302,86 @@ def calculate_care_cost(
     }
 
 
+def calculate_support_cost(
+    support_level: str,
+    visit_count: int,
+    burden_rate: float,
+    selected_additions: dict[str, bool],
+    include_treatment_improvement: bool,
+    include_cafe: bool,
+    master_df: pd.DataFrame,
+) -> dict[str, object]:
+    service_codes = SUPPORT_CARE_SERVICE_CODES[support_level]
+    base_service = get_a6_service(master_df, service_codes["base"])
+
+    rows = []
+    base_subtotal = base_service["units"] * visit_count
+    rows.append(
+        {
+            "項目": f"{support_level} 基本サービス",
+            "サービスコード": base_service["service_code"],
+            "単位数": base_service["units"],
+            "回数": visit_count,
+            "小計単位": base_subtotal,
+            "備考": base_service["name"],
+        }
+    )
+
+    addition_total = 0
+    for addition in service_codes["additions"]:
+        if not selected_additions.get(addition["key"], False):
+            continue
+
+        if addition["code"] is None:
+            continue
+
+        service = get_a6_service(master_df, addition["code"])
+        count = visit_count if addition["kind"] == "per_visit" else 1
+        subtotal = service["units"] * count
+        addition_total += subtotal
+        rows.append(
+            {
+                "項目": addition["label"],
+                "サービスコード": service["service_code"],
+                "単位数": service["units"],
+                "回数": count,
+                "小計単位": subtotal,
+                "備考": service["name"],
+            }
+        )
+
+    prescribed_units = base_subtotal + addition_total
+    treatment_units = round(prescribed_units * 0.105) if include_treatment_improvement else 0
+    if include_treatment_improvement:
+        treatment_service = get_a6_service(master_df, service_codes["treatment"])
+        rows.append(
+            {
+                "項目": "処遇改善加算Ⅲ",
+                "サービスコード": treatment_service["service_code"],
+                "単位数": "10.5%",
+                "回数": 1,
+                "小計単位": treatment_units,
+                "備考": f"{treatment_service['name']} / 所定単位数 × 10.5%",
+            }
+        )
+
+    total_units = prescribed_units + treatment_units
+    insurance_cost = total_units * REGIONAL_UNIT_PRICE * burden_rate
+    out_of_pocket = CAFE_PRICE_PER_VISIT * visit_count if include_cafe else 0
+    total_cost = round(insurance_cost) + out_of_pocket
+
+    return {
+        "rows": rows,
+        "base_units": base_subtotal,
+        "addition_units": addition_total,
+        "treatment_units": treatment_units,
+        "total_units": total_units,
+        "insurance_cost": round(insurance_cost),
+        "out_of_pocket": out_of_pocket,
+        "total_cost": total_cost,
+    }
+
+
 def render_visit_count_selector() -> tuple[str, int, str]:
     st.sidebar.subheader("利用回数")
     calculation_method = st.sidebar.radio(
@@ -240,7 +409,7 @@ with st.sidebar:
     if user_type == "要介護":
         care_level = st.selectbox("介護度", list(CARE_LEVEL_BASE_UNITS.keys()))
     else:
-        care_level = st.selectbox("介護度", ["要支援1", "要支援2"])
+        care_level = st.selectbox("介護度", list(SUPPORT_CARE_SERVICE_CODES.keys()))
 
     burden_label = st.selectbox("負担割合", list(BURDEN_RATES.keys()))
     include_cafe = st.checkbox("カフェ代 250円/回", value=False)
@@ -291,44 +460,67 @@ if user_type == "要介護":
     st.dataframe(pd.DataFrame(result["rows"]), use_container_width=True, hide_index=True)
 
 else:
-    st.subheader("要支援 A6コード確認")
-    st.info("要支援側は、CSVからA6コード・名称・単位数を確認する画面です。計算は次の段階で実装できます。")
+    a6_master_df = load_a6_master()
+    if a6_master_df.empty:
+        st.error("A6サービスコード表CSVが見つかりません。20260601masuta_0522.csv をアプリと同じフォルダに配置してください。")
+        st.stop()
 
-    uploaded_file = st.file_uploader("A6コードを含むCSVをアップロード", type=["csv"])
-    candidate_paths = [BASE_DIR / "20260601masuta_0522.csv", BASE_DIR / "service_codes.csv"]
-
-    source_label = None
-    a6_source_df = None
-    if uploaded_file is not None:
-        a6_source_df = load_uploaded_csv_with_fallback(uploaded_file)
-        source_label = uploaded_file.name
-    else:
-        for candidate_path in candidate_paths:
-            if candidate_path.exists():
-                a6_source_df = load_csv_with_fallback(candidate_path)
-                source_label = candidate_path.name
-                break
-
-    if a6_source_df is None:
-        st.warning("CSVが見つかりません。20260601masuta_0522.csv または service_codes.csv を配置してください。")
-    else:
-        a6_df, column_map = prepare_a6_dataframe(a6_source_df)
-        st.caption(f"読込元: {source_label}")
-
-        search_text = st.text_input("名称・コードで絞り込み", value="")
-        filtered_df = a6_df
-        if search_text:
-            mask = filtered_df.astype(str).apply(
-                lambda row: row.str.contains(search_text, case=False, na=False).any(),
-                axis=1,
+    st.subheader("加算")
+    selected_support_additions = {}
+    support_services = SUPPORT_CARE_SERVICE_CODES[care_level]
+    for addition in support_services["additions"]:
+        if addition["code"] is None:
+            st.checkbox(
+                f"{addition['label']}（CSVに該当コードなし）",
+                value=False,
+                disabled=True,
+                key=f"support_{care_level}_{addition['key']}_missing",
             )
-            filtered_df = filtered_df[mask]
+            selected_support_additions[addition["key"]] = False
+            continue
 
-        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
-        st.caption(
-            f"検出列: コード={column_map['code'] or '未検出'} / "
-            f"名称={column_map['name'] or '未検出'} / 単位数={column_map['units'] or '未検出'}"
+        service = get_a6_service(a6_master_df, addition["code"])
+        selected_support_additions[addition["key"]] = st.checkbox(
+            f"{addition['label']}（{service['units']}単位 / {service['service_code']}）",
+            value=True,
+            key=f"support_{care_level}_{addition['key']}",
         )
+
+    include_support_treatment = st.checkbox(
+        "処遇改善加算Ⅲ（所定単位数 × 10.5%）",
+        value=True,
+        key=f"support_{care_level}_treatment",
+    )
+
+    result = calculate_support_cost(
+        support_level=care_level,
+        visit_count=visit_count,
+        burden_rate=burden_rate,
+        selected_additions=selected_support_additions,
+        include_treatment_improvement=include_support_treatment,
+        include_cafe=include_cafe,
+        master_df=a6_master_df,
+    )
+
+    st.subheader("計算結果")
+    st.caption(f"計算方法: {calculation_method} / 利用回数: {visit_count_label}")
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("月の目安利用回数", f"{visit_count} 回")
+    metric_cols[1].metric("総単位数", f"{result['total_units']:,} 単位")
+    metric_cols[2].metric("介護保険自己負担額", yen(result["insurance_cost"]))
+    metric_cols[3].metric("合計目安金額", yen(result["total_cost"]))
+
+    detail_cols = st.columns(4)
+    detail_cols[0].metric("基本単位", f"{result['base_units']:,} 単位")
+    detail_cols[1].metric("加算単位", f"{result['addition_units']:,} 単位")
+    detail_cols[2].metric("処遇改善加算単位", f"{result['treatment_units']:,} 単位")
+    detail_cols[3].metric("保険外サービス費", yen(result["out_of_pocket"]))
+
+    st.subheader("内訳")
+    st.dataframe(pd.DataFrame(result["rows"]), use_container_width=True, hide_index=True)
+
+    with st.expander("A6サービスコード確認"):
+        st.dataframe(a6_master_df, use_container_width=True, hide_index=True)
 
 st.divider()
 st.caption(
