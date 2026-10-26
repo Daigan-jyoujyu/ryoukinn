@@ -197,6 +197,13 @@ def load_uploaded_csv_with_fallback(uploaded_file) -> pd.DataFrame:
     raise last_error
 
 
+def rows_dataframe(rows: list[dict[str, object]]) -> pd.DataFrame:
+    df = pd.DataFrame(rows)
+    if "単位数" in df.columns:
+        df["単位数"] = df["単位数"].astype(str)
+    return df
+
+
 def find_column(columns: list[str], keywords: list[str]) -> str | None:
     for column in columns:
         normalized = str(column).replace(" ", "").replace("　", "")
@@ -458,7 +465,7 @@ if user_type == "要介護":
     detail_cols[3].metric("保険外サービス費", yen(result["out_of_pocket"]))
 
     st.subheader("内訳")
-    st.dataframe(pd.DataFrame(result["rows"]), width="stretch", hide_index=True)
+    st.dataframe(rows_dataframe(result["rows"]), width="stretch", hide_index=True)
 
 else:
     a6_master_df = load_a6_master()
@@ -518,7 +525,7 @@ else:
     detail_cols[3].metric("保険外サービス費", yen(result["out_of_pocket"]))
 
     st.subheader("内訳")
-    st.dataframe(pd.DataFrame(result["rows"]), width="stretch", hide_index=True)
+    st.dataframe(rows_dataframe(result["rows"]), width="stretch", hide_index=True)
 
     with st.expander("A6サービスコード確認"):
         st.dataframe(a6_master_df, width="stretch", hide_index=True)
